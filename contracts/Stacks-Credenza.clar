@@ -172,3 +172,137 @@
         )
     )
 )
+
+
+
+;; Reputation Management Functions
+(define-private (update-user-reputation (user principal) (skill-id uint) (is-valid bool))
+    (begin
+        (let (
+            (current-user (unwrap! (map-get? users user) false))
+            (current-skill-rep (default-to 
+                {reputation: u0, assessments-given: u0, valid-assessments: u0}
+                (map-get? skill-reputation {user: user, skill-id: skill-id})))
+        )
+            ;; Update overall user reputation
+            (map-set users user
+                (merge current-user {
+                    reputation: (if is-valid
+                        (+ (get reputation current-user) reputation-reward)
+                        (if (> (get reputation current-user) reputation-penalty)
+                            (- (get reputation current-user) reputation-penalty)
+                            u0
+                        )),
+                    total-assessments: (+ (get total-assessments current-user) u1),
+                    invalid-assessments: (if is-valid
+                        (get invalid-assessments current-user)
+                        (+ (get invalid-assessments current-user) u1)
+                    )
+                })
+            )
+
+            ;; Update skill-specific reputation
+            (map-set skill-reputation
+                {user: user, skill-id: skill-id}
+                {
+                    reputation: (if is-valid
+                        (+ (get reputation current-skill-rep) reputation-reward)
+                        (if (> (get reputation current-skill-rep) reputation-penalty)
+                            (- (get reputation current-skill-rep) reputation-penalty)
+                            u0
+                        )),
+                    assessments-given: (+ (get assessments-given current-skill-rep) u1),
+                    valid-assessments: (if is-valid
+                        (+ (get valid-assessments current-skill-rep) u1)
+                        (get valid-assessments current-skill-rep)
+                    )
+                }
+            )
+        )
+        true
+    )
+)
+
+;; Private functions
+(define-private (get-next-skill-id)
+    (let ((current (var-get skill-id-counter)))
+        (var-set skill-id-counter (+ current u1))
+        current
+    )
+)
+
+;; Helper function to process reputation updates
+(define-private (process-assessor-reputation (assessor principal) (score uint) (mean uint) (std-dev uint) (skill-id uint))
+    (let (
+        (score-deviation (if (> score mean)
+            (- score mean)
+            (- mean score)
+        ))
+    )
+        (update-user-reputation 
+            assessor 
+            skill-id
+            (< score-deviation standard-deviation-threshold)
+        )
+    )
+)
+
+;; Public functions
+(define-public (register-user)
+    (let ((sender tx-sender))
+        (asserts! (not (default-to false (get registered (map-get? users sender)))) err-already-registered)
+        (ok (map-set users 
+            sender
+            {
+                registered: true,
+                skills: (list ),
+                reputation: u0,
+                total-assessments: u0,
+                invalid-assessments: u0
+            }
+        ))
+    )
+)
+
+(define-public (add-skill (name (string-ascii 50)) (description (string-ascii 200)) (required-assessments uint) (category (string-ascii 50)))
+    (let ((skill-id (get-next-skill-id)))
+        ;; Input validation
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (asserts! (is-valid-name name) err-invalid-input)
+        (asserts! (is-valid-description description) err-invalid-input)
+        (asserts! (is-valid-category category) err-invalid-input)
+        (asserts! (<= required-assessments max-assessors) err-invalid-score)
+        (asserts! (> required-assessments u0) err-invalid-input)
+
+        (ok (map-set skills 
+            skill-id
+            {
+                name: name,
+                description: description,
+                required-assessments: required-assessments,
+                category: category
+            }
+        ))
+    )
+)
+
+(define-public (request-assessment (skill-id uint))
+    (let ((sender tx-sender))
+        ;; Input validation
+        (asserts! (is-valid-skill-id skill-id) err-invalid-skill-id)
+        (asserts! (default-to false (get registered (map-get? users sender))) err-not-registered)
+        (asserts! (is-none (map-get? skill-assessments {skill-id: skill-id, user: sender})) err-already-assessed)
+
+        (ok (map-set skill-assessments
+            {skill-id: skill-id, user: sender}
+            {
+                assessors: (list ),
+                scores: (list ),
+                verified: false,
+                timestamp: block-height,
+                mean-score: u0,
+                standard-deviation: u0
+            }
+        ))
+    )
+)
